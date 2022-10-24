@@ -6,9 +6,10 @@ Copied on 23/10/22.
 
 Special dependencies: 
   - tensorboardX (pip install tensorboardX)
+  - pandas
 
 Run with:
-  python3 test/variable_train_mnist.py
+  python3 variable_train_mnist.py
 """
 
 # Add parent dir to path to import module
@@ -123,7 +124,7 @@ def train_mnist(flags, **kwargs):
       flags['trace'],
       num_replicas=xm.xrt_world_size(),
       rank=xm.get_ordinal(),
-      minibatch_size=flags.batch_size)
+      minibatch_size=flags['batch_size'])
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
