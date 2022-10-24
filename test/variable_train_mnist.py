@@ -149,7 +149,7 @@ def train_mnist(flags, **kwargs):
   if xm.is_master_ordinal():
     writer = test_utils.get_summary_writer(flags['logdir'])
   internal_optimizer = optim.SGD(model.parameters(), lr=lr, momentum=flags['momentum'])
-  optimizer = vbs.LinearRuleOptimizer(internal_optimizer, ref_batchsize = 256)
+  optimizer = vbs.LinearRuleOptimizer(internal_optimizer, train_sampler, ref_batchsize = 128)
   loss_fn = nn.NLLLoss()
 
   def train_loop_fn(loader, epoch):
