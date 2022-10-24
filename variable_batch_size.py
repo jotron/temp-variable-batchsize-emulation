@@ -66,9 +66,6 @@ class CustomSampler(DistributedSampler):
     if verbose and rank==0:
         print(f"    MySampler (rank {rank}): trace_samples={tot_samples}, minibatches_per_epoch={self.minibatches_per_epoch} => max_epoch=~{self.max_epoch}")
 
-  def __len__(self) -> int:
-    return len(self.__iter__())
-
   def set_epoch(self, epoch: int) -> None:
     if (epoch > self.max_epoch):
       print(f"    Custom Sampler Warning: epoch > max_epoch")
@@ -117,6 +114,9 @@ class CustomSampler(DistributedSampler):
     trace = self.trace[start:end]
     assert(sum(trace) <= self.minibatch_size*self.minibatches_per_epoch)
     return trace
+
+  def __bool__(self):
+    return True
 
   def __iter__(self):
     """
