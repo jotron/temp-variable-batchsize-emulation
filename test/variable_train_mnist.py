@@ -11,6 +11,11 @@ Run with:
   python3 test/variable_train_mnist.py
 """
 
+# Add parent dir to path to import module
+import sys
+from pathlib import Path
+sys.path.append(str(Path('.').absolute().parent))
+
 import variable_batch_size as vbs
 
 FLAGS = dict(
