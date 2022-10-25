@@ -51,7 +51,7 @@ class CustomSampler(DistributedSampler):
     elif isinstance(trace, int):
       self.trace = [trace] * 2000000
     if verbose and rank==0:
-        print(f"    MySampler (rank {rank}): Loaded Trace {trace} starting with {self.trace[0]}, {self.trace[1]},...")
+        print(f"    MySampler (rank {rank}): Loaded trace starting with {self.trace[0]}, {self.trace[1]},...")
 
     # Check trace is valid
     tot_samples = 0

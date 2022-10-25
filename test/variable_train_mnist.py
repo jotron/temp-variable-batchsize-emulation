@@ -27,9 +27,10 @@ FLAGS = dict(
     num_cores=8,
     num_workers=4,
     num_epochs=5,
-    log_steps=20,
+    log_steps=5,
+    log_all = False, # Log every step AND every accumulation step.
     target_accuracy=97.0,
-    trace='test_trace.csv',
+    trace=[1024]*100000,
     ref_batchsize=128,
     tidy=False,
     metrics_debug=False,
@@ -128,10 +129,7 @@ def train_mnist(flags, **kwargs):
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=flags['batch_size'],
-        sampler=train_sampler,
-        drop_last=flags['drop_last'],
-        shuffle=False if train_sampler else True,
+        batch_sampler=train_sampler,
         num_workers=flags['num_workers'])
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
@@ -140,29 +138,25 @@ def train_mnist(flags, **kwargs):
         shuffle=False,
         num_workers=flags['num_workers'])
 
-  # Scale learning rate to num cores
-  lr = flags['lr'] * xm.xrt_world_size()
-
   device = xm.xla_device()
   model = MNIST().to(device)
   writer = None
   if xm.is_master_ordinal():
     writer = test_utils.get_summary_writer(flags['logdir'])
-  internal_optimizer = optim.SGD(model.parameters(), lr=lr, momentum=flags['momentum'])
-  optimizer = vbs.LinearRuleOptimizer(internal_optimizer, train_sampler, ref_batchsize = 128)
+  internal_optimizer = optim.SGD(model.parameters(), lr=flags['lr'], momentum=flags['momentum'])
+  optimizer = vbs.LinearRuleOptimizer(internal_optimizer, train_sampler, ref_batchsize = 128, log_steps=flags['log_steps'] if not flags['log_all'] else 1)
   loss_fn = nn.NLLLoss()
 
   def train_loop_fn(loader, epoch):
     tracker = xm.RateTracker()
     model.train()
     for step, (data, target) in enumerate(loader):
-      optimizer.zero_grad()
       output = model(data)
       loss = loss_fn(output, target)
       loss.backward()
-      xm.optimizer_step(optimizer)
+      optimizer.step()
       tracker.add(flags['batch_size'])
-      if step % flags['log_steps'] == 0:
+      if flags['log_all']:
         xm.add_step_closure(
             _train_update,
             args=(device, step, loss, tracker, epoch, writer),
@@ -185,6 +179,7 @@ def train_mnist(flags, **kwargs):
   train_device_loader = pl.MpDeviceLoader(train_loader, device)
   test_device_loader = pl.MpDeviceLoader(test_loader, device)
   accuracy, max_accuracy = 0.0, 0.0
+  xm.rendezvous("Training Start")
   for epoch in range(1, flags['num_epochs'] + 1):
     xm.master_print('Epoch {} train begin {}'.format(epoch, test_utils.now()))
     train_sampler.set_epoch(epoch-1)
