@@ -347,6 +347,127 @@ class RootRuleOptimizer(CustomOptimizer):
     return RootRuleOptimizer.F(ref_lr, bs, self.ref_batchsize)
 
 
+class AdaScaleOptimizer(CustomOptimizer):
+  """
+  Implements the version of Appendix B.3 of the paper.
+  As the AdaScale gain "influences" the current step, a special iteration loop 
+  is required.
+  Note: This implementation computes a seperate learning rate for each parameter group.
+  Args:
+    optimizer (torch.optimizer): e.g. SGD
+    sampler (CustomSampler): The custom sampler used.
+    log_steps (int): Log Interval
+  """
+  def __init__(self, optimizer, sampler, log_steps=None, ref_batchsize=32):
+    super(AdaScaleOptimizer, self).__init__(optimizer, sampler, log_steps)
+    # The norm of the per-minibatch gradients get accumulated here
+    self.accum_grad_sqr = np.zeros(len(self.optimizer.param_groups))
+    # Exponential Moving Averages
+    self.grad_sqr_avg = np.ones(len(self.optimizer.param_groups))
+    self.grad_var_avg = np.zeros(len(self.optimizer.param_groups))
+    # Required to interpret learning rates from lr_schedule
+    self.ref_batchsize = ref_batchsize
+    self.last_grads = None
+    self._scale = 1.0
+    xm.master_print(f"Model has {len(self.optimizer.param_groups)} parameter groups!")
+  
+  def adapt_lr(self):
+    """
+    Called when gradients across minibatches have been averaged.
+    Updates the exponential averages and sets the learning rate accordingly.
+    """
+    # Scale (S)
+    scale = self.divisors[self.step_index]
+    if (self._scale != scale):
+      self.grad_var_avg *= self._scale / scale
+      self._scale = scale
+
+    # Compute sum minigradient norm_sqr over total batch
+    self.accum_grad_sqr = all_reduce_tensors_mesh(tag="accumulated_grad_norms", data=self.accum_grad_sqr, 
+      scale=1.0)
+
+    # Compute gradient norm_sqr
+    xm.mark_step()
+    grad_norm_sqr = np.zeros(len(self.optimizer.param_groups)) 
+    for (i, grad_group) in enumerate(self._fetch_gradients_grouped()):
+      for grad in grad_group:
+        grad_norm_sqr[i] += grad.pow(2).sum().item()
+
+    # Estimate grad_sqr, grad_var
+    grad_var = (1.0/(scale-1.0)) * self.accum_grad_sqr - (scale/(scale-1.0)) * grad_norm_sqr
+    grad_sqr = grad_norm_sqr - (1.0/scale) * grad_var
+    grad_var = np.clip(grad_var, a_min=1e-6, a_max=None)
+    grad_sqr = np.clip(grad_sqr, a_min=0.0, a_max=None)
+
+    # Update exponential moving averages
+    theta = max(0.0, 1-scale/1000)
+    self.grad_var_avg = (1-theta) * grad_var + theta * self.grad_var_avg
+    self.grad_sqr_avg = (1-theta) * grad_sqr + theta * self.grad_sqr_avg
+
+    # Update lr
+    lr = self.current_lr()
+    self.set_lr(lr)
+
+    # Reset for next large step
+    self.accum_grad_sqr.fill(0.0)
+
+    # Log
+    if self.log_steps is not None and (self.step_index % self.log_steps == 0): 
+      xm.master_print(f"    Adascale: Step={self.step_index}, gain={self.gain()}, grad_var_avg={self.grad_var_avg}, grad_sqr_avg={self.grad_sqr_avg}")
+
+  def gain(self):
+    """Gain, tuple, entry for each param group"""
+    var = self.grad_var_avg
+    sqr = self.grad_sqr_avg
+    gain = (var + sqr) / (var / self._scale + sqr)
+    return tuple(gain.tolist())
+
+  def current_lr(self):
+    lr = [ref_lr / self.ref_batchsize * self.sampler.minibatch_size * gain for (ref_lr, gain) 
+      in zip(self.get_lr(), self.gain())]
+    return tuple(lr)
+
+  def step(self):
+    """ For each minibatch, keep track of the norm of the individual gradient. 
+        As gradients get accumulated, take differences to measure impact of individual minibatch."""
+    # List of gradient list for each parameter group
+    updated_grads = self._fetch_gradients_grouped()
+
+    # First step
+    if self.last_grads is None:
+      self.last_grads = [[torch.zeros_like(grad, requires_grad=False) for grad in grad_group] for grad_group in updated_grads]
+
+    # Record norm of diff
+    xm.mark_step()
+    with torch.no_grad():
+      for i in range(len(updated_grads)):
+        local_grad_sqr = torch.tensor(0.0, device=xm.xla_device())
+        for (last_grad, updated_grad) in zip(self.last_grads[i], updated_grads[i]):
+          local_grad_sqr += (updated_grad-last_grad).pow(2).sum()
+
+        self.accum_grad_sqr[i] += local_grad_sqr.item()
+        for j in range(len(self.last_grads[i])):
+          self.last_grads[i][j].copy_(updated_grads[i][j])
+
+    # Perform normal step
+    return super().step()
+
+  def _fetch_gradients_grouped(self):
+    """
+    Provides list of gradient tensors.
+    """
+    gradient_groups = []
+    for param_group in self.optimizer.__getstate__()['param_groups']:
+      gradients = []
+      for group, params in param_group.items():
+        if group == 'params':
+          for p in params:
+            if isinstance(p, torch.Tensor) and p.grad is not None:
+              gradients.append(p.grad.data)
+      gradient_groups.append(gradients)
+    return gradient_groups
+
+
 def init_group(local_ordinal, cores_per_host=8):
   """
   Initialize group for inter-device synchronization.
