@@ -68,7 +68,7 @@ The idea is that your script iterates through essentially the same data as befor
 
 *1: Accumulate 2: Update 3: Accumulate 4: Accumulate 5: Update …*
 
-Multi-core training works similarlyf except that depending on the batch size not all cores may accumulate for the same number of “substeps”.
+Multi-core training works similarly except that depending on the batch size not all cores may accumulate for the same number of “substeps”.
 
 ### Learning rate scaling
 
